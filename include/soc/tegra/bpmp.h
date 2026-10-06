@@ -94,6 +94,7 @@ struct tegra_bpmp {
 
 	struct tegra_bpmp_clk **clocks;
 	unsigned int num_clocks;
+	unsigned int clk_probe_workers;
 
 	struct reset_controller_dev rstc;
 

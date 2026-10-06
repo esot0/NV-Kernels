@@ -3,8 +3,11 @@
  * Copyright (C) 2016-2022 NVIDIA Corporation
  */
 
+#include <linux/atomic.h>
 #include <linux/clk-provider.h>
 #include <linux/device.h>
+#include <linux/kthread.h>
+#include <linux/minmax.h>
 #include <linux/seq_buf.h>
 #include <linux/slab.h>
 
@@ -23,6 +26,14 @@ struct tegra_bpmp_clk_info {
 	unsigned int parents[MRQ_CLK_MAX_PARENTS];
 	unsigned int num_parents;
 	unsigned long flags;
+	int status;
+};
+
+struct tegra_bpmp_clk_probe {
+	struct tegra_bpmp *bpmp;
+	struct tegra_bpmp_clk_info *clocks;
+	unsigned int max_id;
+	atomic_t next_id;
 };
 
 struct tegra_bpmp_clk {
@@ -378,6 +389,64 @@ static int tegra_bpmp_clk_get_info(struct tegra_bpmp *bpmp, unsigned int id,
 	return 0;
 }
 
+static int tegra_bpmp_clk_probe_worker(void *data)
+{
+	struct tegra_bpmp_clk_probe *probe = data;
+	unsigned int id;
+
+	for (;;) {
+		struct tegra_bpmp_clk_info *info;
+
+		id = atomic_fetch_inc(&probe->next_id);
+		if (id > probe->max_id)
+			break;
+
+		info = &probe->clocks[id];
+		info->status = tegra_bpmp_clk_get_info(probe->bpmp, id, info);
+	}
+
+	return 0;
+}
+
+static void tegra_bpmp_clk_probe_all(struct tegra_bpmp *bpmp,
+				     struct tegra_bpmp_clk_info *clocks,
+				     unsigned int max_id)
+{
+	struct tegra_bpmp_clk_probe probe = {
+		.bpmp = bpmp,
+		.clocks = clocks,
+		.max_id = max_id,
+		.next_id = ATOMIC_INIT(0),
+	};
+	struct task_struct **tasks = NULL;
+	unsigned int i, started = 0;
+	unsigned int workers;
+
+	workers = min3(bpmp->clk_probe_workers, bpmp->threaded.count,
+		       max_id + 1);
+
+	if (workers > 1)
+		tasks = kcalloc(workers - 1, sizeof(*tasks), GFP_KERNEL);
+
+	if (tasks) {
+		for (i = 0; i < workers - 1; i++) {
+			tasks[i] = kthread_run(tegra_bpmp_clk_probe_worker, &probe,
+					       "tegra-bpmp-clk/%u", i);
+			if (IS_ERR(tasks[i]))
+				break;
+
+			started++;
+		}
+	}
+
+	tegra_bpmp_clk_probe_worker(&probe);
+
+	for (i = 0; i < started; i++)
+		kthread_stop(tasks[i]);
+
+	kfree(tasks);
+}
+
 static void tegra_bpmp_clk_info_dump(struct tegra_bpmp *bpmp,
 				     const char *level,
 				     const struct tegra_bpmp_clk_info *info)
@@ -438,11 +507,12 @@ static int tegra_bpmp_probe_clocks(struct tegra_bpmp *bpmp,
 	if (!clocks)
 		return -ENOMEM;
 
-	for (id = 0; id <= max_id; id++) {
-		struct tegra_bpmp_clk_info *info = &clocks[count];
+	tegra_bpmp_clk_probe_all(bpmp, clocks, max_id);
 
-		err = tegra_bpmp_clk_get_info(bpmp, id, info);
-		if (err < 0)
+	for (id = 0; id <= max_id; id++) {
+		struct tegra_bpmp_clk_info *info = &clocks[id];
+
+		if (info->status < 0)
 			continue;
 
 		if (info->num_parents >= U8_MAX) {
@@ -459,6 +529,10 @@ static int tegra_bpmp_probe_clocks(struct tegra_bpmp *bpmp,
 		}
 
 		info->id = id;
+		if (count != id)
+			clocks[count] = *info;
+
+		info = &clocks[count];
 		count++;
 
 		if (TEGRA_BPMP_DUMP_CLOCK_INFO)
