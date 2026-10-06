@@ -25,6 +25,10 @@
 #define MSG_RING	BIT(1)
 #define TAG_SZ		32
 
+static bool enable_debugfs = true;
+module_param_named(debugfs, enable_debugfs, bool, 0444);
+MODULE_PARM_DESC(debugfs, "Mirror the BPMP firmware debug tree");
+
 static inline const struct tegra_bpmp_ops *
 channel_to_ops(struct tegra_bpmp_channel *channel)
 {
@@ -962,9 +966,12 @@ static int tegra_bpmp_probe(struct platform_device *pdev)
 		goto free_mrq;
 	}
 
-	err = tegra_bpmp_init_debugfs(bpmp);
-	if (err < 0)
-		dev_err(&pdev->dev, "debugfs initialization failed: %d\n", err);
+	if (enable_debugfs) {
+		err = tegra_bpmp_init_debugfs(bpmp);
+		if (err < 0)
+			dev_err(&pdev->dev,
+				"debugfs initialization failed: %d\n", err);
+	}
 
 	return 0;
 
