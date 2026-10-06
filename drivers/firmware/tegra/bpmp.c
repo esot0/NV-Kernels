@@ -7,6 +7,7 @@
 #include <linux/clk/tegra.h>
 #include <linux/genalloc.h>
 #include <linux/mailbox_client.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -17,6 +18,7 @@
 
 #include <soc/tegra/bpmp.h>
 #include <soc/tegra/bpmp-abi.h>
+#include <soc/tegra/fuse.h>
 #include <soc/tegra/ivc.h>
 
 #include "bpmp-private.h"
@@ -25,6 +27,10 @@
 #define MSG_RING	BIT(1)
 #define TAG_SZ		32
 
+static unsigned int clk_probe_workers;
+module_param(clk_probe_workers, uint, 0444);
+MODULE_PARM_DESC(clk_probe_workers,
+		 "Number of parallel BPMP clock probe workers (0 = automatic)");
 static inline const struct tegra_bpmp_ops *
 channel_to_ops(struct tegra_bpmp_channel *channel)
 {
@@ -844,6 +850,15 @@ static int tegra_bpmp_init_channels(struct tegra_bpmp *bpmp)
 
 	bpmp->threaded.count = bpmp->soc->channels.thread.count;
 	sema_init(&bpmp->threaded.lock, bpmp->threaded.count);
+	if (clk_probe_workers)
+		bpmp->clk_probe_workers = clk_probe_workers;
+	else if (tegra_get_chip_id() == TEGRA264)
+		bpmp->clk_probe_workers = 3;
+	else
+		bpmp->clk_probe_workers = 1;
+
+	bpmp->clk_probe_workers = clamp(bpmp->clk_probe_workers, 1U,
+					bpmp->threaded.count);
 
 	size = BITS_TO_LONGS(bpmp->threaded.count) * sizeof(long);
 
